@@ -6,6 +6,7 @@ import (
 
 func main() {
 	mux := http.NewServeMux()
+	mux.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.Dir("assets"))))
 
 	server := &http.Server{
 		Addr:    ":8080",
@@ -13,7 +14,5 @@ func main() {
 	}
 
 	server.ListenAndServe()
-
-
 
 }
