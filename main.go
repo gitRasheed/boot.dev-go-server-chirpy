@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync/atomic"
@@ -8,6 +9,10 @@ import (
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+}
+
+type chirpRequest struct {
+	Body string `json:"body"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -36,6 +41,30 @@ func (cfg *apiConfig) handlerAdminReset(w http.ResponseWriter, r *http.Request) 
 	w.Write([]byte("Hits reset to 0"))
 }
 
+func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req chirpRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Something went wrong"})
+		return
+	}
+
+	if len(req.Body) > 140 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Chirp is too long"})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]bool{"valid": true})
+}
+
 func main() {
 	mux := http.NewServeMux()
 	apiCfg := &apiConfig{}
@@ -51,6 +80,7 @@ func main() {
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerAdminMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.handlerAdminReset)
+	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
 
 	server := &http.Server{
 		Addr:    ":8080",
