@@ -13,7 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-
+	
+	"github.com/gitRasheed/boot.dev-go-server-chirpy/internal/auth"
 	"github.com/gitRasheed/boot.dev-go-server-chirpy/internal/database"
 )
 
@@ -37,7 +38,8 @@ type chirpResponse struct {
 }
 
 type createUserRequest struct {
-	Email string `json:"email"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type userResponse struct {
@@ -45,6 +47,11 @@ type userResponse struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+}
+
+type loginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -95,7 +102,16 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	u, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
+	hashed, err := auth.HashPassword(req.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not hash password")
+		return
+	}
+
+	u, err := cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          req.Email,
+		HashedPassword: hashed,
+	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "failed to create user")
 		return
@@ -227,6 +243,41 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 	respondWithJSON(w, http.StatusCreated, resp)
 }
 
+func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	u, err := cfg.dbQueries.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+			return
+		}
+		respondWithError(w, http.StatusInternalServerError, "login failed")
+		return
+	}
+
+	match, err := auth.CheckPasswordHash(req.Password, u.HashedPassword)
+	if err != nil || !match {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	resp := userResponse{
+		ID:        u.ID,
+		CreatedAt: u.CreatedAt,
+		UpdatedAt: u.UpdatedAt,
+		Email:     u.Email,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	respondWithJSON(w, http.StatusOK, resp)
+}
+
 func respondWithError(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
@@ -274,6 +325,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlerCreateChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerGetChirpByID)
+	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 
 	server := &http.Server{
 		Addr:    ":8080",
