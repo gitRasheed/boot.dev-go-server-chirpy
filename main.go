@@ -24,11 +24,16 @@ type apiConfig struct {
 }
 
 type chirpRequest struct {
-	Body string `json:"body"`
+	Body   string    `json:"body"`
+	UserID uuid.UUID `json:"user_id"`
 }
 
 type chirpResponse struct {
-	CleanedBody string `json:"cleaned_body"`
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
 }
 
 type createUserRequest struct {
@@ -82,23 +87,79 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+
 	var req createUserRequest
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+
 	u, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "failed to create user")
 		return
 	}
+
 	resp := userResponse{
 		ID:        u.ID,
 		CreatedAt: u.CreatedAt,
 		UpdatedAt: u.UpdatedAt,
 		Email:     u.Email,
 	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusCreated)
+	respondWithJSON(w, http.StatusCreated, resp)
+}
+
+func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req chirpRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	if len(req.Body) > 140 {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	profane := []string{"kerfuffle", "sharbert", "fornax"}
+	words := strings.Split(req.Body, " ")
+	for i, w := range words {
+		for _, bad := range profane {
+			if strings.ToLower(w) == bad {
+				words[i] = "****"
+				break
+			}
+		}
+	}
+	cleaned := strings.Join(words, " ")
+
+	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body:   cleaned,
+		UserID: req.UserID,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "failed to create chirp")
+		return
+	}
+
+	resp := chirpResponse{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusCreated)
 	respondWithJSON(w, http.StatusCreated, resp)
@@ -114,48 +175,12 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	json.NewEncoder(w).Encode(payload)
 }
 
-func cleanProfanity(text string) string {
-	profane := []string{"kerfuffle", "sharbert", "fornax"}
-	words := strings.Split(text, " ")
-	for i, w := range words {
-		for _, bad := range profane {
-			if strings.ToLower(w) == bad {
-				words[i] = "****"
-				break
-			}
-		}
-	}
-	return strings.Join(words, " ")
-}
-
-func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req chirpRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Something went wrong")
-		return
-	}
-
-	if len(req.Body) > 140 {
-		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
-		return
-	}
-
-	cleaned := cleanProfanity(req.Body)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	respondWithJSON(w, http.StatusOK, chirpResponse{CleanedBody: cleaned})
-}
-
 func main() {
 	err := godotenv.Load()
 	if err != nil {
 		fmt.Println("Warning: .env file not found")
 	}
+
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 
@@ -183,8 +208,8 @@ func main() {
 
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerAdminMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.handlerAdminReset)
-	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
 	mux.HandleFunc("POST /api/users", apiCfg.handlerCreateUser)
+	mux.HandleFunc("POST /api/chirps", apiCfg.handlerCreateChirp)
 
 	server := &http.Server{
 		Addr:    ":8080",
