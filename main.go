@@ -8,17 +8,19 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 
 	"github.com/gitRasheed/boot.dev-go-server-chirpy/internal/database"
-
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
-	dbQueries       *database.Queries
+	dbQueries      *database.Queries
+	platform       string
 }
 
 type chirpRequest struct {
@@ -27,6 +29,17 @@ type chirpRequest struct {
 
 type chirpResponse struct {
 	CleanedBody string `json:"cleaned_body"`
+}
+
+type createUserRequest struct {
+	Email string `json:"email"`
+}
+
+type userResponse struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -50,9 +63,45 @@ func (cfg *apiConfig) handlerAdminMetrics(w http.ResponseWriter, r *http.Request
 }
 
 func (cfg *apiConfig) handlerAdminReset(w http.ResponseWriter, r *http.Request) {
+	if cfg.platform != "dev" {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	err := cfg.dbQueries.DeleteAllUsers(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "failed to reset users")
+		return
+	}
 	cfg.fileserverHits.Store(0)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte("Hits reset to 0"))
+	w.Write([]byte("All users deleted, hits reset to 0"))
+}
+
+func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req createUserRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	u, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "failed to create user")
+		return
+	}
+	resp := userResponse{
+		ID:        u.ID,
+		CreatedAt: u.CreatedAt,
+		UpdatedAt: u.UpdatedAt,
+		Email:     u.Email,
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusCreated)
+	respondWithJSON(w, http.StatusCreated, resp)
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
@@ -108,15 +157,20 @@ func main() {
 		fmt.Println("Warning: .env file not found")
 	}
 	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		panic(err)
 	}
 	defer db.Close()
+
 	dbQueries := database.New(db)
 	apiCfg := &apiConfig{
 		dbQueries: dbQueries,
+		platform:  platform,
 	}
+
 	mux := http.NewServeMux()
 	fileHandler := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(fileHandler))
@@ -130,6 +184,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerAdminMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.handlerAdminReset)
 	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
+	mux.HandleFunc("POST /api/users", apiCfg.handlerCreateUser)
 
 	server := &http.Server{
 		Addr:    ":8080",
