@@ -1,15 +1,24 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+
+	"github.com/gitRasheed/boot.dev-go-server-chirpy/internal/database"
+
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries       *database.Queries
 }
 
 type chirpRequest struct {
@@ -94,9 +103,21 @@ func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: .env file not found")
+	}
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+	dbQueries := database.New(db)
+	apiCfg := &apiConfig{
+		dbQueries: dbQueries,
+	}
 	mux := http.NewServeMux()
-	apiCfg := &apiConfig{}
-
 	fileHandler := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(fileHandler))
 
