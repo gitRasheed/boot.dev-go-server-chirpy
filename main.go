@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"math"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -22,6 +23,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 type chirpRequest struct {
@@ -50,8 +52,9 @@ type userResponse struct {
 }
 
 type loginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	ExpiresInSeconds int    `json:"expires_in_seconds"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -102,6 +105,11 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if req.Email == "" || req.Password == "" {
+		respondWithError(w, http.StatusBadRequest, "email and password required")
+		return
+	}
+
 	hashed, err := auth.HashPassword(req.Password)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "could not hash password")
@@ -125,7 +133,6 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusCreated)
 	respondWithJSON(w, http.StatusCreated, resp)
 }
 
@@ -192,13 +199,22 @@ func (cfg *apiConfig) handlerGetChirpByID(w http.ResponseWriter, r *http.Request
 }
 
 func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "missing or invalid authorization header")
 		return
 	}
 
-	var req chirpRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
+	userID, err := auth.ValidateJWT(tokenString, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+
+	var req struct {
+		Body string `json:"body"`
+	}
+	err = json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "invalid JSON")
 		return
@@ -223,7 +239,7 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 
 	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   cleaned,
-		UserID: req.UserID,
+		UserID: userID,
 	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "failed to create chirp")
@@ -245,8 +261,7 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 
 func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondWithError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
@@ -267,11 +282,30 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := userResponse{
+	expires := time.Hour
+	if req.ExpiresInSeconds > 0 {
+		seconds := math.Min(float64(req.ExpiresInSeconds), time.Hour.Seconds())
+		expires = time.Duration(seconds) * time.Second
+	}
+
+	token, err := auth.MakeJWT(u.ID, cfg.jwtSecret, expires)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not create token")
+		return
+	}
+
+	resp := struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+		Token     string    `json:"token"`
+	}{
 		ID:        u.ID,
 		CreatedAt: u.CreatedAt,
 		UpdatedAt: u.UpdatedAt,
 		Email:     u.Email,
+		Token:     token,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -304,9 +338,16 @@ func main() {
 	defer db.Close()
 
 	dbQueries := database.New(db)
+
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		panic("JWT_SECRET missing")
+	}
+
 	apiCfg := &apiConfig{
 		dbQueries: dbQueries,
 		platform:  platform,
+		jwtSecret: jwtSecret,
 	}
 
 	mux := http.NewServeMux()
