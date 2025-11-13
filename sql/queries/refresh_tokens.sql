@@ -9,7 +9,7 @@ SET revoked_at = NOW(), updated_at = NOW()
 WHERE token = $1;
 
 -- name: GetUserFromRefreshToken :one
-SELECT u.id, u.created_at, u.updated_at, u.email
+SELECT u.id, u.created_at, u.updated_at, u.email, u.is_chirpy_red
 FROM refresh_tokens rt
 JOIN users u ON u.id = rt.user_id
 WHERE rt.token = $1
