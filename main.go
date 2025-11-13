@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	
+
 	"github.com/gitRasheed/boot.dev-go-server-chirpy/internal/auth"
 	"github.com/gitRasheed/boot.dev-go-server-chirpy/internal/database"
 )
@@ -23,6 +23,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	platform       string
 	jwtSecret      string
+	polkaKey string
 }
 
 type chirpRequest struct {
@@ -501,41 +502,47 @@ func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlePolkaWebhook(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Event string `json:"event"`
-		Data  struct {
-			UserID string `json:"user_id"`
-		} `json:"data"`
-	}
+    key, err := auth.GetAPIKey(r.Header)
+    if err != nil || key != cfg.polkaKey {
+        w.WriteHeader(http.StatusUnauthorized)
+        return
+    }
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
+    var req struct {
+        Event string `json:"event"`
+        Data  struct {
+            UserID string `json:"user_id"`
+        } `json:"data"`
+    }
 
-	if req.Event != "user.upgraded" {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        w.WriteHeader(http.StatusBadRequest)
+        return
+    }
 
-	uid, err := uuid.Parse(req.Data.UserID)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
+    if req.Event != "user.upgraded" {
+        w.WriteHeader(http.StatusNoContent)
+        return
+    }
 
-	rows, err := cfg.dbQueries.UpgradeUserToChirpyRed(r.Context(), uid)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+    uid, err := uuid.Parse(req.Data.UserID)
+    if err != nil {
+        w.WriteHeader(http.StatusBadRequest)
+        return
+    }
 
-	if rows == 0 {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
+    rows, err := cfg.dbQueries.UpgradeUserToChirpyRed(r.Context(), uid)
+    if err != nil {
+        w.WriteHeader(http.StatusInternalServerError)
+        return
+    }
 
-	w.WriteHeader(http.StatusNoContent)
+    if rows == 0 {
+        w.WriteHeader(http.StatusNotFound)
+        return
+    }
+
+    w.WriteHeader(http.StatusNoContent)
 }
 
 func main() {
@@ -560,10 +567,16 @@ func main() {
 		panic("JWT_SECRET missing")
 	}
 
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		panic("POLKA_KEY missing")
+	}
+
 	apiCfg := &apiConfig{
 		dbQueries: dbQueries,
 		platform:  platform,
 		jwtSecret: jwtSecret,
+		polkaKey:  polkaKey,
 	}
 
 	mux := http.NewServeMux()
