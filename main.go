@@ -43,6 +43,11 @@ type createUserRequest struct {
 	Password string `json:"password"`
 }
 
+type updateUserRequest struct {
+    Email    string `json:"email"`
+    Password string `json:"password"`
+}
+
 type userResponse struct {
 	ID        uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -132,6 +137,61 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	respondWithJSON(w, http.StatusCreated, resp)
+}
+
+func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPut {
+        w.WriteHeader(http.StatusMethodNotAllowed)
+        return
+    }
+
+    tokenString, err := auth.GetBearerToken(r.Header)
+    if err != nil {
+        respondWithError(w, http.StatusUnauthorized, "missing or invalid authorization header")
+        return
+    }
+
+    userID, err := auth.ValidateJWT(tokenString, cfg.jwtSecret)
+    if err != nil {
+        respondWithError(w, http.StatusUnauthorized, "invalid token")
+        return
+    }
+
+    var req updateUserRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        respondWithError(w, http.StatusBadRequest, "invalid JSON")
+        return
+    }
+
+    if req.Email == "" || req.Password == "" {
+        respondWithError(w, http.StatusBadRequest, "email and password required")
+        return
+    }
+
+    hashed, err := auth.HashPassword(req.Password)
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "could not hash password")
+        return
+    }
+
+    u, err := cfg.dbQueries.UpdateUser(r.Context(), database.UpdateUserParams{
+        ID:            userID,
+        Email:         req.Email,
+        HashedPassword: hashed,
+    })
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "failed to update user")
+        return
+    }
+
+    resp := userResponse{
+        ID:        u.ID,
+        CreatedAt: u.CreatedAt,
+        UpdatedAt: u.UpdatedAt,
+        Email:     u.Email,
+    }
+
+    respondWithJSON(w, http.StatusOK, resp)
 }
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +488,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
+	mux.HandleFunc("PUT /api/users", apiCfg.handlerUpdateUser)
 
 	server := &http.Server{
 		Addr:    ":8080",
