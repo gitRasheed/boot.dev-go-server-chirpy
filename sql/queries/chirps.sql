@@ -8,3 +8,7 @@ VALUES (
     $2
 )
 RETURNING id, created_at, updated_at, body, user_id;
+
+-- name: DeleteChirp :execrows
+DELETE FROM chirps
+WHERE id = $1;

@@ -316,6 +316,60 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 	respondWithJSON(w, http.StatusCreated, resp)
 }
 
+func (cfg *apiConfig) handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodDelete {
+        w.WriteHeader(http.StatusMethodNotAllowed)
+        return
+    }
+
+    tokenString, err := auth.GetBearerToken(r.Header)
+    if err != nil {
+        respondWithError(w, http.StatusUnauthorized, "missing or invalid authorization header")
+        return
+    }
+
+    userID, err := auth.ValidateJWT(tokenString, cfg.jwtSecret)
+    if err != nil {
+        respondWithError(w, http.StatusUnauthorized, "invalid token")
+        return
+    }
+
+    idStr := r.PathValue("chirpID")
+    chirpID, err := uuid.Parse(idStr)
+    if err != nil {
+        respondWithError(w, http.StatusBadRequest, "invalid chirp ID")
+        return
+    }
+
+    chirp, err := cfg.dbQueries.GetChirpByID(r.Context(), chirpID)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            respondWithError(w, http.StatusNotFound, "chirp not found")
+            return
+        }
+        respondWithError(w, http.StatusInternalServerError, "failed to retrieve chirp")
+        return
+    }
+
+    if chirp.UserID != userID {
+        respondWithError(w, http.StatusForbidden, "forbidden")
+        return
+    }
+
+    rows, err := cfg.dbQueries.DeleteChirp(r.Context(), chirpID)
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "failed to delete chirp")
+        return
+    }
+
+    if rows == 0 {
+        respondWithError(w, http.StatusNotFound, "chirp not found")
+        return
+    }
+
+    w.WriteHeader(http.StatusNoContent)
+}
+
 func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -485,6 +539,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiCfg.handlerCreateChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerGetChirpByID)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handlerDeleteChirp)
 	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
